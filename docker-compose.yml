@@ -1,0 +1,687 @@
+version: '3'
+
+volumes:
+  auth_postgres_data:
+  auth_redis_data:
+  postgres_movies_data:
+  redis_movies_data:
+  elasticsearch_movies_data:
+  jaeger_volume:
+  user_profile_postgres_data:
+  user_data_redis:
+  postgres_to_redis_data:
+  mongo_data:
+
+networks:
+  movies_network:
+  auth_network:
+  ugc_network:
+  user_profile_network:
+  recommendation_network:
+
+services:
+  zookeeper_kafka:
+    image: confluentinc/cp-zookeeper:7.4.0
+    hostname: zookeeper_kafka
+    container_name: zookeeper_kafka
+    ports:
+      - "2181:2181"
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    networks:
+      - ugc_network
+
+  broker:
+    image: confluentinc/cp-server:7.4.0
+    hostname: broker
+    container_name: broker
+    depends_on:
+      - zookeeper_kafka
+    ports:
+      - "9092:9092"
+      - "9101:9101"
+      - "29092:29092"
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: 'zookeeper_kafka:2181'
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://broker:29092,PLAINTEXT_HOST://localhost:9092
+      KAFKA_METRIC_REPORTERS: io.confluent.metrics.reporter.ConfluentMetricsReporter
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_CONFLUENT_LICENSE_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_CONFLUENT_BALANCER_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_JMX_PORT: 9101
+      KAFKA_JMX_HOSTNAME: localhost
+      KAFKA_CONFLUENT_SCHEMA_REGISTRY_URL: http://schema-registry:8081
+      CONFLUENT_METRICS_REPORTER_BOOTSTRAP_SERVERS: broker:29092
+      CONFLUENT_METRICS_REPORTER_TOPIC_REPLICAS: 1
+      CONFLUENT_METRICS_ENABLE: 'true'
+      CONFLUENT_SUPPORT_CUSTOMER_ID: 'anonymous'
+    networks:
+      - ugc_network
+      - recommendation_network
+
+  schema-registry:
+    image: confluentinc/cp-schema-registry:7.4.0
+    hostname: schema-registry
+    container_name: schema-registry
+    depends_on:
+      - broker
+    ports:
+      - "8081:8081"
+    environment:
+      SCHEMA_REGISTRY_HOST_NAME: schema-registry
+      SCHEMA_REGISTRY_KAFKASTORE_BOOTSTRAP_SERVERS: 'broker:29092'
+      SCHEMA_REGISTRY_LISTENERS: http://0.0.0.0:8081
+    networks:
+      - ugc_network
+
+  connect:
+    image: cnfldemos/cp-server-connect-datagen:0.5.3-7.1.0
+    hostname: connect
+    container_name: connect
+    depends_on:
+      - broker
+      - schema-registry
+    ports:
+      - "8083:8083"
+    environment:
+      CONNECT_BOOTSTRAP_SERVERS: 'broker:29092'
+      CONNECT_REST_ADVERTISED_HOST_NAME: connect
+      CONNECT_GROUP_ID: compose-connect-group
+      CONNECT_CONFIG_STORAGE_TOPIC: docker-connect-configs
+      CONNECT_CONFIG_STORAGE_REPLICATION_FACTOR: 1
+      CONNECT_OFFSET_FLUSH_INTERVAL_MS: 10000
+      CONNECT_OFFSET_STORAGE_TOPIC: docker-connect-offsets
+      CONNECT_OFFSET_STORAGE_REPLICATION_FACTOR: 1
+      CONNECT_STATUS_STORAGE_TOPIC: docker-connect-status
+      CONNECT_STATUS_STORAGE_REPLICATION_FACTOR: 1
+      CONNECT_KEY_CONVERTER: org.apache.kafka.connect.storage.StringConverter
+      CONNECT_VALUE_CONVERTER: io.confluent.connect.avro.AvroConverter
+      CONNECT_VALUE_CONVERTER_SCHEMA_REGISTRY_URL: http://schema-registry:8081
+      # CLASSPATH required due to CC-2422
+      CLASSPATH: /usr/share/java/monitoring-interceptors/monitoring-interceptors-7.4.0.jar
+      CONNECT_PRODUCER_INTERCEPTOR_CLASSES: "io.confluent.monitoring.clients.interceptor.MonitoringProducerInterceptor"
+      CONNECT_CONSUMER_INTERCEPTOR_CLASSES: "io.confluent.monitoring.clients.interceptor.MonitoringConsumerInterceptor"
+      CONNECT_PLUGIN_PATH: "/usr/share/java,/usr/share/confluent-hub-components"
+      CONNECT_LOG4J_LOGGERS: org.apache.zookeeper=ERROR,org.I0Itec.zkclient=ERROR,org.reflections=ERROR
+    networks:
+      - ugc_network
+
+  control-center:
+    image: confluentinc/cp-enterprise-control-center:7.4.0
+    hostname: control-center
+    container_name: control-center
+    depends_on:
+      - broker
+      - schema-registry
+      - connect
+      - ksqldb-server
+    ports:
+      - "9021:9021"
+    environment:
+      CONTROL_CENTER_BOOTSTRAP_SERVERS: 'broker:29092'
+      CONTROL_CENTER_CONNECT_CONNECT-DEFAULT_CLUSTER: 'connect:8083'
+      CONTROL_CENTER_KSQL_KSQLDB1_URL: "http://ksqldb-server:8088"
+      CONTROL_CENTER_KSQL_KSQLDB1_ADVERTISED_URL: "http://localhost:8088"
+      CONTROL_CENTER_SCHEMA_REGISTRY_URL: "http://schema-registry:8081"
+      CONTROL_CENTER_REPLICATION_FACTOR: 1
+      CONTROL_CENTER_INTERNAL_TOPICS_PARTITIONS: 1
+      CONTROL_CENTER_MONITORING_INTERCEPTOR_TOPIC_PARTITIONS: 1
+      CONFLUENT_METRICS_TOPIC_REPLICATION: 1
+      PORT: 9021
+    networks:
+      - ugc_network
+
+  ksqldb-server:
+    image: confluentinc/cp-ksqldb-server:7.4.0
+    hostname: ksqldb-server
+    container_name: ksqldb-server
+    depends_on:
+      - broker
+      - connect
+    ports:
+      - "8088:8088"
+    environment:
+      KSQL_CONFIG_DIR: "/etc/ksql"
+      KSQL_BOOTSTRAP_SERVERS: "broker:29092"
+      KSQL_HOST_NAME: ksqldb-server
+      KSQL_LISTENERS: "http://0.0.0.0:8088"
+      KSQL_CACHE_MAX_BYTES_BUFFERING: 0
+      KSQL_KSQL_SCHEMA_REGISTRY_URL: "http://schema-registry:8081"
+      KSQL_PRODUCER_INTERCEPTOR_CLASSES: "io.confluent.monitoring.clients.interceptor.MonitoringProducerInterceptor"
+      KSQL_CONSUMER_INTERCEPTOR_CLASSES: "io.confluent.monitoring.clients.interceptor.MonitoringConsumerInterceptor"
+      KSQL_KSQL_CONNECT_URL: "http://connect:8083"
+      KSQL_KSQL_LOGGING_PROCESSING_TOPIC_REPLICATION_FACTOR: 1
+      KSQL_KSQL_LOGGING_PROCESSING_TOPIC_AUTO_CREATE: 'true'
+      KSQL_KSQL_LOGGING_PROCESSING_STREAM_AUTO_CREATE: 'true'
+    networks:
+      - ugc_network
+
+  ksqldb-cli:
+    image: confluentinc/cp-ksqldb-cli:7.4.0
+    container_name: ksqldb-cli
+    depends_on:
+      - broker
+      - connect
+      - ksqldb-server
+    entrypoint: /bin/sh
+    tty: true
+    networks:
+      - ugc_network
+
+  ksql-datagen:
+    image: confluentinc/ksqldb-examples:7.4.0
+    hostname: ksql-datagen
+    container_name: ksql-datagen
+    depends_on:
+      - ksqldb-server
+      - broker
+      - schema-registry
+      - connect
+    command: "bash -c 'echo Waiting for Kafka to be ready... && \
+                       cub kafka-ready -b broker:29092 1 40 && \
+                       echo Waiting for Confluent Schema Registry to be ready... && \
+                       cub sr-ready schema-registry 8081 40 && \
+                       echo Waiting a few seconds for topic creation to finish... && \
+                       sleep 11 && \
+                       tail -f /dev/null'"
+    environment:
+      KSQL_CONFIG_DIR: "/etc/ksql"
+      STREAMS_BOOTSTRAP_SERVERS: broker:29092
+      STREAMS_SCHEMA_REGISTRY_HOST: schema-registry
+      STREAMS_SCHEMA_REGISTRY_PORT: 8081
+    networks:
+      - ugc_network
+
+  rest-proxy:
+    image: confluentinc/cp-kafka-rest:7.4.0
+    depends_on:
+      - broker
+      - schema-registry
+    ports:
+      - 8082:8082
+    hostname: rest-proxy
+    container_name: rest-proxy
+    environment:
+      KAFKA_REST_HOST_NAME: rest-proxy
+      KAFKA_REST_BOOTSTRAP_SERVERS: 'broker:29092'
+      KAFKA_REST_LISTENERS: "http://0.0.0.0:8082"
+      KAFKA_REST_SCHEMA_REGISTRY_URL: 'http://schema-registry:8081'
+    networks:
+      - ugc_network
+
+  mongo:
+    image: mongo
+    container_name: mongo
+    restart: always
+    volumes:
+      - ./mongodb_scripts:/scripts
+      - ./db_dumps/ugc_database.gz:/scripts/ugc_database.gz  # for test
+      - ./mongodb_scripts/mongo-init.sh:/docker-entrypoint-initdb.d/mongo-init.sh
+      - /etc/localtime:/etc/localtime:ro
+      - mongo_data:/data/db
+    healthcheck:
+      test: echo 'db.runCommand("ping").ok'
+      interval: 10s
+      timeout: 10s
+      retries: 3
+    expose:
+      - "27017"
+    networks:
+      - ugc_network
+      - recommendation_network
+
+  jaeger:
+    image: jaegertracing/all-in-one:1.20.0
+    container_name: jaeger
+    restart: always
+    volumes:
+      - jaeger_volume:/badger
+    environment:
+      - SPAN_STORAGE_TYPE=badger
+      - BADGER_EPHEMERAL=false
+      - BADGER_DIRECTORY_VALUE=/badger/data
+      - BADGER_DIRECTORY_KEY=/badger/key
+    networks:
+      - movies_network
+      - auth_network
+      - ugc_network
+      - user_profile_network
+      - recommendation_network
+    ports:
+      - "6831:6831/udp"
+      - "16686:16686"
+
+  db-auth:
+    image: postgres:13-alpine
+    container_name: db-auth
+    restart: always
+    environment:
+      POSTGRES_DB: ${AUTH_DB_NAME}
+      POSTGRES_USER: ${AUTH_DB_USER}
+      POSTGRES_PASSWORD: ${AUTH_DB_PASSWORD}
+    volumes:
+      - auth_postgres_data:/var/lib/postgresql/data/
+      - ./db_dumps/auth_database.sql:/docker-entrypoint-initdb.d/auth_database.sql  # for test
+    networks:
+      - auth_network
+    healthcheck:
+      test: [ "CMD-SHELL", "pg_isready -d $$AUTH_POSTGRES_DB -U $$AUTH_POSTGRES_USER" ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    expose:
+      - "5432"
+
+  redis-auth:
+    image: redis:7.0.8-alpine
+    container_name: redis-auth
+    restart: always
+    volumes:
+      - auth_redis_data:/data
+    networks:
+      - auth_network
+    healthcheck:
+      test: [ "CMD", "redis-cli", "ping" ]
+    expose:
+      - "6379"
+
+  api-auth:
+    build: ./flask_auth
+    container_name: api-auth
+    restart: always
+    depends_on:
+      db-auth:
+        condition: service_healthy
+      redis-auth:
+        condition: service_healthy
+    env_file:
+      - .env
+    healthcheck:
+      test: "curl -H 'X-Request-Id: ${AUTH_HEALTHCHECK_REQUEST_ID}' --fail http://127.0.0.1:8000/api/v1/health || exit 1"
+      interval: 10s
+      timeout: 10s
+      retries: 3
+    networks:
+      - auth_network
+    expose:
+      - "8000"
+
+  db-movies:
+    image: postgres:13-alpine
+    container_name: db-movies
+    restart: always
+    environment:
+      POSTGRES_DB: ${DB_NAME}
+      POSTGRES_USER: ${DB_USER}
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+    volumes:
+      - postgres_movies_data:/var/lib/postgresql/data/
+      - ./db_dumps/movies_database.sql:/docker-entrypoint-initdb.d/movies_database.sql
+    networks:
+      - movies_network
+    healthcheck:
+      test: [ "CMD-SHELL", "pg_isready -d $$POSTGRES_DB -U $$POSTGRES_USER" ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    expose:
+      - "5432"
+
+  redis-movies:
+    image: redis:7.0.8-alpine
+    container_name: redis-movies
+    restart: always
+    volumes:
+      - redis_movies_data:/data
+    networks:
+      - movies_network
+    healthcheck:
+      test: [ "CMD", "redis-cli", "ping" ]
+    expose:
+      - "6379"
+
+  elasticsearch-movies:
+    image: elasticsearch:7.17.9
+    container_name: elasticsearch-movies
+    restart: always
+    environment:
+      - "discovery.type=single-node"
+      - "xpack.security.enabled=false"
+      - "ES_JAVA_OPTS=-Xms200m -Xmx200m"
+    volumes:
+      - elasticsearch_movies_data:/usr/share/elasticsearch/data
+    networks:
+      - movies_network
+    healthcheck:
+      test: [ "CMD-SHELL", "curl --silent --fail localhost:9200/_cluster/health || exit 1" ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    expose:
+      - "9200"
+
+  postgres_to_es:
+    build: ./postgres_to_es
+    container_name: postgres_to_es
+    restart: always
+    depends_on:
+      db-movies:
+        condition: service_healthy
+      elasticsearch-movies:
+        condition: service_healthy
+      redis-movies:
+        condition: service_healthy
+    env_file:
+      - .env
+    networks:
+      - movies_network
+
+  api-movies:
+    build: ./movies_api
+    container_name: api-movies
+    restart: always
+    healthcheck:
+          test: "curl -H 'X-Request-Id: ${MOVIES_HEALTHCHECK_REQUEST_ID}' --fail http://127.0.0.1:8000/api/v1/movies/health || exit 1"
+          interval: 10s
+          timeout: 10s
+          retries: 3
+    depends_on:
+      db-movies:
+        condition: service_healthy
+      elasticsearch-movies:
+        condition: service_healthy
+      redis-movies:
+        condition: service_healthy
+    env_file:
+      - .env
+    networks:
+      - movies_network
+    expose:
+      - "8000"
+
+  api-ugc:
+    build: ./ugc
+    container_name: api-ugc
+    restart: always
+    healthcheck:
+      test: "curl -H 'X-Request-Id: ${UGC_HEALTHCHECK_REQUEST_ID}' --fail http://127.0.0.1:8000/api/v1/ugc/health || exit 1"
+      interval: 10s
+      timeout: 10s
+      retries: 3
+    env_file:
+      - .env
+    networks:
+      - ugc_network
+    expose:
+      - "8000"
+
+  redis-user-data:
+    image: redis:7.0.8-alpine
+    container_name: redis-user-data
+    restart: always
+    volumes:
+      - user_data_redis:/data
+      - ./db_dumps/redis_user_database.rdb:/data/dump.rdb  #  for test
+    networks:
+      - recommendation_network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+    expose:
+      - "6379"
+
+  kafka_to_redis:
+    build: ./kafka_to_redis
+    container_name: kafka_to_redis
+    restart: always
+    env_file:
+      - .env
+    depends_on:
+      redis-user-data:
+        condition: service_healthy
+    networks:
+      - ugc_network
+      - recommendation_network
+
+  kafka_to_mongo:
+    build: ./kafka_to_mongo
+    container_name: kafka_to_mongo
+    restart: always
+    env_file:
+      - .env
+    networks:
+      - ugc_network
+
+  postgres_to_redis:
+    build: ./postgres_to_redis
+    container_name: postgres_to_redis
+    restart: always
+    env_file:
+      - .env
+    depends_on:
+      redis-user-data:
+        condition: service_healthy
+      db-user-profile:
+        condition: service_healthy
+    networks:
+      - user_profile_network
+      - recommendation_network
+    volumes:
+      - postgres_to_redis_data:/opt/app
+
+  db-user-profile:
+    image: postgres:13-alpine
+    container_name: db-user-profile
+    restart: always
+    environment:
+      POSTGRES_DB: ${USER_PROFILE_DB_NAME}
+      POSTGRES_USER: ${USER_PROFILE_DB_USER}
+      POSTGRES_PASSWORD: ${USER_PROFILE_DB_PASSWORD}
+    volumes:
+      - user_profile_postgres_data:/var/lib/postgresql/data/
+      - ./db_dumps/user_profile_database.sql:/docker-entrypoint-initdb.d/user_profile_database.sql  # for test
+    networks:
+      - user_profile_network
+    healthcheck:
+      test: [ "CMD-SHELL", "pg_isready -d $$USER_PROFILE_POSTGRES_DB -U $$USER_PROFILE_POSTGRES_USER" ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    expose:
+      - "5432"
+
+  api-user-profile:
+    build: ./user_profile
+    container_name: api-user-profile
+    restart: always
+    healthcheck:
+      test: "curl -H 'X-Request-Id: ${USER_PROFILE_HEALTHCHECK_REQUEST_ID}' --fail http://127.0.0.1:8000/api/v1/user_profile/health || exit 1"
+      interval: 10s
+      timeout: 10s
+      retries: 3
+    depends_on:
+      db-user-profile:
+        condition: service_healthy
+    env_file:
+      - .env
+    networks:
+      - user_profile_network
+    expose:
+      - "8000"
+
+  api-user-recommendations:
+    build: ./user_recommendations
+    container_name: api-user-recommendations
+    restart: always
+    healthcheck:
+      test: "curl -H 'X-Request-Id: ${USER_RECOMMENDATIONS_HEALTHCHECK_REQUEST_ID}' --fail http://127.0.0.1:8000/api/v1/recommendation/movies/health || exit 1"
+      interval: 10s
+      timeout: 10s
+      retries: 3
+    depends_on:
+      redis-user-data:
+        condition: service_healthy
+      api-movies:
+        condition: service_healthy
+    env_file:
+      - .env
+    networks:
+      - user_profile_network
+      - recommendation_network
+      - movies_network
+    expose:
+      - "8000"
+
+  general-data-aggregator:
+    build: ./general_data_aggregator
+    container_name: general-data-aggregator
+    restart: always
+    depends_on:
+      elasticsearch-movies:
+        condition: service_healthy
+      mongo:
+        condition: service_healthy
+    env_file:
+      - .env
+    networks:
+      - movies_network
+      - ugc_network
+      - recommendation_network
+
+  api-general-recommendations:
+    build: ./general_recommendations
+    container_name: api-general-recommendations
+    restart: always
+    depends_on:
+      general-data-aggregator:
+        condition: service_started
+    healthcheck:
+      test: "curl -H 'X-Request-Id: ${USER_RECOMMENDATIONS_HEALTHCHECK_REQUEST_ID}' --fail http://127.0.0.1:8000/api/v1/health || exit 1"
+      interval: 10s
+      timeout: 10s
+      retries: 3
+    env_file:
+      - .env
+    networks:
+      - ugc_network
+      - recommendation_network
+    expose:
+      - "8000"
+
+  api-movies-preprocessor:
+    build: ./movies_preprocessor
+    container_name: api-movies-preprocessor
+    restart: always
+    healthcheck:
+      test: "curl -H 'X-Request-Id: ${MOVIES_PREPROCESSOR_HEALTHCHECK_REQUEST_ID}' --fail http://127.0.0.1:8000/api/v1/movies_preprocessor/health || exit 1"
+      interval: 10s
+      timeout: 10s
+      retries: 3
+    env_file:
+      - .env
+    networks:
+      - recommendation_network
+    expose:
+      - "8000"
+
+  api-similar-movies:
+    build: ./similar_movies
+    container_name: api-similar-movies
+    restart: always
+    healthcheck:
+      test: "curl -H 'X-Request-Id: ${SIMILAR_MOVIES_HEALTHCHECK_REQUEST_ID}' --fail http://127.0.0.1:8000/api/v1/similar_movies/health || exit 1"
+      interval: 10s
+      timeout: 10s
+      retries: 3
+    env_file:
+      - .env
+    networks:
+      - recommendation_network
+    expose:
+      - "8000"
+
+  scheduler-similar-movies:
+    build: ./similar_movies_scheduler
+    container_name: scheduler-similar-movies
+    restart: always
+    depends_on:
+      elasticsearch-movies:
+        condition: service_healthy
+      api-similar-movies:
+        condition: service_healthy
+      api-movies-preprocessor:
+        condition: service_healthy
+      mongo:
+        condition: service_healthy
+    env_file:
+      - .env
+    networks:
+      - movies_network
+      - recommendation_network
+
+  api-personal-recommendations:
+    build: ./personal_recommendations
+    container_name: api-personal-recommendations
+    restart: always
+    healthcheck:
+      test: "curl -H 'X-Request-Id: ${PERSONAL_RECOMMENDATIONS_HEALTHCHECK_REQUEST_ID}' --fail http://127.0.0.1:8000/api/v1/personal_recommendations/health || exit 1"
+      interval: 10s
+      timeout: 10s
+      retries: 3
+    env_file:
+      - .env
+    networks:
+      - recommendation_network
+    expose:
+      - "8000"
+
+  scheduler-personal-recommendations:
+    build: ./personal_recommendations_scheduler
+    container_name: scheduler-personal-recommendations
+    restart: always
+    depends_on:
+      api-personal-recommendations:
+        condition: service_healthy
+      redis-user-data:
+        condition: service_healthy
+      mongo:
+        condition: service_healthy
+    env_file:
+      - .env
+    networks:
+      - recommendation_network
+
+  nginx:
+    image: nginx:1.23.1-alpine
+    container_name: nginx-movies
+    restart: always
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx/conf.d:/etc/nginx/conf.d:ro
+      - /tmp/logs/nginx/:/var/log/nginx/
+    depends_on:
+      api-auth:
+        condition: service_healthy
+      api-movies:
+        condition: service_healthy
+      api-user-profile:
+        condition: service_healthy
+      api-ugc:
+        condition: service_healthy
+      api-user-recommendations:
+        condition: service_healthy
+      api-general-recommendations:
+        condition: service_healthy
+    networks:
+      - movies_network
+      - auth_network
+      - ugc_network
+      - user_profile_network
+      - recommendation_network
+    ports:
+      - "80:80"
